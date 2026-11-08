@@ -5,25 +5,51 @@ on:
   pull_request:
 
 jobs:
-  build-and-test:
+  firmware:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
       - uses: actions/cache@v4
         with:
           path: ~/.platformio
           key: pio-${{ hashFiles('platformio.ini') }}
-
       - name: Install PlatformIO
         run: pip install platformio==6.1.16
-
-      - name: Unit tests (host)
+      - name: Firmware unit tests (host)
         run: pio test -e native
-
       - name: Build firmware (both variants)
         run: pio run -e rgbw -e rgbcct
+
+  bridge:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bridge
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - name: Bridge unit + API tests
+        run: pytest -q
+
+  end-to-end:
+    needs: bridge
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Start the stack (real Mosquitto, bridge, simulated bulbs, receiver)
+        run: docker compose up -d --build
+      - run: pip install -e "bridge"
+      - name: End-to-end checks
+        run: python bridge/scripts/e2e_smoke.py
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs

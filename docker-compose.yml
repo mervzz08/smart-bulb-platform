@@ -1,0 +1,34 @@
+# Whole system without hardware: broker, bridge, two simulated bulbs and an
+# example webhook subscriber.   docker compose up --build
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2.0.18
+    volumes:
+      - ./deploy/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    ports:
+      - "1883:1883"
+
+  bridge:
+    build: ./bridge
+    image: bulb-bridge:local
+    env_file: deploy/demo.env
+    ports:
+      - "8000:8000"
+    depends_on: [mosquitto]
+
+  sim-rgbw:
+    image: bulb-bridge:local
+    command: python -m simulators.bulb_sim --id sim-rgbw --variant rgbw --host mosquitto
+    depends_on: [mosquitto, bridge]
+
+  sim-rgbcct:
+    image: bulb-bridge:local
+    command: python -m simulators.bulb_sim --id sim-rgbcct --variant rgbcct --host mosquitto
+    depends_on: [mosquitto, bridge]
+
+  webhook-receiver:
+    image: bulb-bridge:local
+    command: python -m simulators.webhook_receiver --port 9000 --secret demo-subscriber-secret-0123
+    ports:
+      - "9000:9000"
+    depends_on: [bridge]

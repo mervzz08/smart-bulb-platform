@@ -2,7 +2,9 @@
 // with Home Assistant discovery, captive-portal setup, OTA updates.
 
 #include <Arduino.h>
+#include <ArduinoJson.h>
 #include <ArduinoOTA.h>
+#include <ESP8266WebServer.h>
 #include <ESP8266WiFi.h>
 
 #include "ColorMath.h"
@@ -35,6 +37,8 @@ MqttLink mqtt;
 bulb::Topics topics;
 String deviceId;
 
+ESP8266WebServer api(80);  // local REST API, started once Wi-Fi is up
+
 bool provisioning = false;
 bool bootWindowOpen = true;
 bool otaStarted = false;
@@ -61,17 +65,67 @@ void announce() {
   publishState();
 }
 
-void onCommand(const char* payload, size_t len) {
+// Shared by MQTT and the local REST API, so both paths behave identically.
+bulb::CommandResult handleCommand(const char* payload, size_t len) {
   const bulb::CommandResult r = bulb::applyCommand(state, payload, len, kCaps);
   if (!r.ok) {
     Serial.printf("[cmd] rejected: %s\n", r.error);
     mqtt.publishError(r.error);
-    return;
+    return r;
   }
   showState(r.transitionMs);
   publishState();
   stateDirty = true;
   stateDirtyAtMs = millis();
+  return r;
+}
+
+void onMqttCommand(const char* payload, size_t len) { handleCommand(payload, len); }
+
+// Constant-time comparison: the time taken does not depend on how many
+// leading characters of a guess are right.
+bool secureEquals(const String& a, const String& b) {
+  if (a.length() != b.length()) return false;
+  uint8_t diff = 0;
+  for (size_t i = 0; i < a.length(); ++i) diff |= static_cast<uint8_t>(a[i] ^ b[i]);
+  return diff == 0;
+}
+
+bool apiAuthorized() {
+  const String header = api.header("Authorization");
+  if (header.startsWith("Bearer ") && secureEquals(header.substring(7), config.apPass)) return true;
+  api.sendHeader(F("WWW-Authenticate"), F("Bearer realm=\"bulb\""));
+  api.send(401, F("application/json"), F("{\"error\":\"unauthorized\"}"));
+  return false;
+}
+
+void sendState() {
+  char buf[256];
+  const size_t n = bulb::writeState(state, kCaps, buf, sizeof buf);
+  api.send(n ? 200 : 500, F("application/json"), n ? buf : "{\"error\":\"state too large\"}");
+}
+
+void startLocalApi() {
+  api.collectHeaders("Authorization");  // the server drops headers it was not told to keep
+  api.on("/api/state", HTTP_GET, [] {
+    if (apiAuthorized()) sendState();
+  });
+  api.on("/api/state", HTTP_POST, [] {
+    if (!apiAuthorized()) return;
+    const String& body = api.arg("plain");
+    const bulb::CommandResult r = handleCommand(body.c_str(), body.length());
+    if (r.ok) {
+      sendState();
+    } else {
+      JsonDocument doc;  // serializer escapes the quotes in some error messages
+      doc["error"] = r.error;
+      String err;
+      serializeJson(doc, err);
+      api.send(422, F("application/json"), err);
+    }
+  });
+  api.onNotFound([] { api.send(404, F("application/json"), F("{\"error\":\"not found\"}")); });
+  api.begin();
 }
 
 void startProvisioning() {
@@ -98,7 +152,7 @@ void startNetwork() {
   WiFi.begin(config.ssid.c_str(), config.wifiPass.c_str());
   Serial.printf("[wifi] connecting to \"%s\"\n", config.ssid.c_str());
 
-  mqtt.begin(config, topics, host, onCommand, announce);
+  mqtt.begin(config, topics, host, onMqttCommand, announce);
 }
 
 void startOta() {
@@ -107,6 +161,7 @@ void startOta() {
   ArduinoOTA.onStart([] { Serial.println(F("[ota] update started")); });
   ArduinoOTA.onError([](ota_error_t e) { Serial.printf("[ota] error %u\n", e); });
   ArduinoOTA.begin();
+  startLocalApi();
   otaStarted = true;
   Serial.printf("[wifi] connected, ip %s\n", WiFi.localIP().toString().c_str());
 }
@@ -171,7 +226,10 @@ void loop() {
   }
 
   if (!otaStarted && WiFi.status() == WL_CONNECTED) startOta();
-  if (otaStarted) ArduinoOTA.handle();
+  if (otaStarted) {
+    ArduinoOTA.handle();
+    api.handleClient();
+  }
   mqtt.loop(now);
 
   if (stateDirty && now - stateDirtyAtMs >= kSaveDebounceMs) {

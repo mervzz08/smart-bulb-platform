@@ -1,3 +1,9 @@
 .pio/
 .vscode/
 *.bin
+__pycache__/
+*.egg-info/
+.pytest_cache/
+bridge/.e2e-logs/
+deploy/mosquitto/certs/
+deploy/mosquitto/passwords

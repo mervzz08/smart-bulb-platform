@@ -1,0 +1,111 @@
+{
+  "info": {
+    "name": "Bulb Bridge",
+    "description": "Try the bridge API against `docker compose up`. Run '2. OAuth token' first; it saves the access token for the other requests. The webhook request signs its own body with HMAC-SHA256 in a pre-request script.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8000" },
+    { "key": "clientId", "value": "shop-backend" },
+    { "key": "clientSecret", "value": "demo-client-secret-0123456789" },
+    { "key": "opsKey", "value": "demo-ops-key-0123456789" },
+    { "key": "shopSecret", "value": "demo-shop-secret-0123456789" },
+    { "key": "deviceId", "value": "sim-rgbcct" },
+    { "key": "accessToken", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "1. Health",
+      "request": { "method": "GET", "url": "{{baseUrl}}/health" },
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('broker connected', () => pm.expect(pm.response.json().mqtt_connected).to.be.true);"
+      ] } }]
+    },
+    {
+      "name": "2. OAuth token (client credentials)",
+      "request": {
+        "method": "POST",
+        "url": "{{baseUrl}}/oauth/token",
+        "auth": { "type": "basic", "basic": [
+          { "key": "username", "value": "{{clientId}}" },
+          { "key": "password", "value": "{{clientSecret}}" }
+        ] },
+        "body": { "mode": "urlencoded", "urlencoded": [
+          { "key": "grant_type", "value": "client_credentials" },
+          { "key": "scope", "value": "devices:read devices:write events:read" }
+        ] }
+      },
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('token issued', () => pm.response.to.have.status(200));",
+        "pm.collectionVariables.set('accessToken', pm.response.json().access_token);"
+      ] } }]
+    },
+    {
+      "name": "3. List devices (Bearer)",
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/devices",
+        "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{accessToken}}" }] }
+      }
+    },
+    {
+      "name": "4. List devices (API key)",
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/devices",
+        "header": [{ "key": "X-API-Key", "value": "{{opsKey}}" }]
+      }
+    },
+    {
+      "name": "5. Send command (warm white, wait for confirmation)",
+      "request": {
+        "method": "POST",
+        "url": "{{baseUrl}}/devices/{{deviceId}}/commands",
+        "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{accessToken}}" }] },
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": { "mode": "raw", "raw": "{\"color_temp\": 370, \"brightness\": 140, \"transition\": 1}" }
+      },
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('confirmed by the bulb', () => pm.expect(pm.response.json().status).to.eql('confirmed'));"
+      ] } }]
+    },
+    {
+      "name": "6. Unsupported command (expect 422)",
+      "request": {
+        "method": "POST",
+        "url": "{{baseUrl}}/devices/sim-rgbw/commands",
+        "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{accessToken}}" }] },
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": { "mode": "raw", "raw": "{\"color_temp\": 300}" }
+      },
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('rejected before reaching the bulb', () => pm.response.to.have.status(422));"
+      ] } }]
+    },
+    {
+      "name": "7. Shop webhook: order.paid (HMAC signed)",
+      "request": {
+        "method": "POST",
+        "url": "{{baseUrl}}/webhooks/shop",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "X-Shop-Signature", "value": "{{shopSignature}}" }
+        ],
+        "body": { "mode": "raw", "raw": "{{webhookBody}}" }
+      },
+      "event": [
+        { "listen": "prerequest", "script": { "exec": [
+          "const ts = Math.floor(Date.now() / 1000);",
+          "const id = 'evt_' + Math.random().toString(16).slice(2, 14);",
+          "const body = JSON.stringify({ id, type: 'order.paid', created_at: ts, data: { order_id: 'ord_postman', total: '49.00', currency: 'USD' } });",
+          "const sig = CryptoJS.HmacSHA256(ts + '.' + body, pm.collectionVariables.get('shopSecret')).toString(CryptoJS.enc.Hex);",
+          "pm.variables.set('webhookBody', body);",
+          "pm.variables.set('shopSignature', `t=${ts},v1=${sig}`);"
+        ] } },
+        { "listen": "test", "script": { "exec": [
+          "pm.test('processed', () => pm.expect(pm.response.json().status).to.eql('processed'));"
+        ] } }
+      ]
+    }
+  ]
+}
