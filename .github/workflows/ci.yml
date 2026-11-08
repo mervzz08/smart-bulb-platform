@@ -49,7 +49,7 @@ jobs:
         run: docker compose up -d --build
       - run: pip install -e "bridge"
       - name: End-to-end checks
-        run: python bridge/scripts/e2e_smoke.py
+        run: python bridge/scripts/e2e_smoke.py --kill-cmd "docker compose kill sim-rgbw"
       - name: Logs on failure
         if: failure()
         run: docker compose logs

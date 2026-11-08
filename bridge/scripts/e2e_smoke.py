@@ -4,7 +4,7 @@ OAuth, API keys, REST command round-trips through MQTT, capability checks,
 WebSocket events, signed inbound webhooks (valid / duplicate / tampered),
 the flash-and-restore automation, signed outbound webhooks, and MQTT Last Will.
 
-  python scripts/e2e_smoke.py [--kill-pid <pid of the sim-rgbw process>]
+  python scripts/e2e_smoke.py [--kill-pid <pid> | --kill-cmd "docker compose kill sim-rgbw"]
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import asyncio
 import json
 import os
 import signal
+import subprocess
 import sys
 import time
 
@@ -74,7 +75,7 @@ def signed_post(http: httpx.AsyncClient, event: dict, body: bytes | None = None)
                      headers={"Content-Type": "application/json", "X-Shop-Signature": sign_header(SHOP_SECRET, raw)})
 
 
-async def main(kill_pid: int | None) -> None:
+async def main(kill_pid: int | None, kill_cmd: str | None) -> None:
     async with httpx.AsyncClient(timeout=10) as http:
         async def stack_ready():
             health = (await http.get(f"{BASE}/health")).json()
@@ -130,8 +131,11 @@ async def main(kill_pid: int | None) -> None:
                   and restored["data"]["color_mode"] == "color_temp" and restored["data"]["brightness"] == 140,
                   "bulb restored to its exact previous state after the alert", restored)
 
-            if kill_pid:
-                os.kill(kill_pid, signal.SIGTERM if os.name != "nt" else signal.SIGTERM)
+            if kill_pid or kill_cmd:
+                if kill_pid:
+                    os.kill(kill_pid, signal.SIGTERM)
+                else:
+                    subprocess.run(kill_cmd, shell=True, check=True)
                 offline = await next_ws_event(ws, lambda e: e["type"] == "device.availability"
                                               and e["device_id"] == "sim-rgbw" and not e["data"]["online"], 15)
                 check(offline is not None, "bulb going away is reported offline (availability topic)", offline)
@@ -148,5 +152,7 @@ async def main(kill_pid: int | None) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--kill-pid", type=int)
-    asyncio.run(main(parser.parse_args().kill_pid))
+    parser.add_argument("--kill-pid", type=int, help="pid of the sim-rgbw process to stop")
+    parser.add_argument("--kill-cmd", help="shell command that stops sim-rgbw (e.g. docker compose kill sim-rgbw)")
+    args = parser.parse_args()
+    asyncio.run(main(args.kill_pid, args.kill_cmd))
